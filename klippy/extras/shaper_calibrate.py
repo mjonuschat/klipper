@@ -41,6 +41,8 @@ class CalibrationData:
             psd[:] = np.maximum(psd, other_normalized)
     def set_numpy(self, numpy):
         self.numpy = numpy
+    def get_numpy(self):
+        return self.numpy
     def normalize_to_frequencies(self):
         freq_bins = self.freq_bins
         for psd in self._psd_list:
@@ -48,6 +50,8 @@ class CalibrationData:
             psd *= self.numpy.tanh(.5 / MIN_FREQ * freq_bins) / (freq_bins + .1)
     def get_psd(self, axis='all'):
         return self._psd_map[axis]
+    def get_freq_bins(self):
+        return self.freq_bins
 
 
 CalibrationResult = collections.namedtuple(
