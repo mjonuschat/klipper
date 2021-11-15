@@ -238,6 +238,22 @@ class ADXL345:
         if any([a not in am for a in axes_map]):
             raise config.error("Invalid adxl345 axes_map parameter")
         self.axes_map = [am[a.strip()] for a in axes_map]
+        offset = config.getfloatlist('offset', (0., 0., 0.), count=3)
+        axes_transform = config.getlists(
+                'axes_transform', None, seps=(',', '\n'), parser=float, count=3)
+        if axes_transform is None:
+            axes_map = config.getlist('axes_map', ('x','y','z'), count=3)
+            am = {'x': (0, 1.), 'y': (1, 1.), 'z': (2, 1.),
+                  '-x': (0, -1.), '-y': (1, -1.), '-z': (2, -1.)}
+            if any([a not in am for a in axes_map]):
+                raise config.error("Invalid adxl345 axes_map parameter")
+            axes_transform = [[0., 0., 0.],
+                              [0., 0., 0.],
+                              [0., 0., 0.]]
+            for i, a in enumerate(axes_map):
+                ind, val = am[a.strip()]
+                axes_transform[i][ind] = val
+        self.set_transform(axes_transform, offset)
         self.data_rate = config.getint('rate', 3200)
         if self.data_rate not in QUERY_RATES:
             raise config.error("Invalid rate parameter: %d" % (self.data_rate,))
@@ -300,7 +316,8 @@ class ADXL345:
             self.raw_samples.append(params)
     def _extract_samples(self, raw_samples):
         # Load variables to optimize inner loop below
-        (x_pos, x_scale), (y_pos, y_scale), (z_pos, z_scale) = self.axes_map
+        tr_x, tr_y, tr_z = self.axes_transform
+        offs_x, offs_y, offs_z = self.offset
         last_sequence = self.last_sequence
         time_base, chip_base, inv_freq = self.clock_sync.get_time_translation()
         # Process every message in raw_samples
@@ -318,14 +335,15 @@ class ADXL345:
                 if yzhigh & 0x80:
                     self.last_error_count += 1
                     continue
-                rx = (xlow | ((xzhigh & 0x1f) << 8)) - ((xzhigh & 0x10) << 9)
-                ry = (ylow | ((yzhigh & 0x1f) << 8)) - ((yzhigh & 0x10) << 9)
+                rx = ((xlow | ((xzhigh & 0x1f) << 8)) - ((xzhigh & 0x10) << 9)
+                        - offs_x)
+                ry = ((ylow | ((yzhigh & 0x1f) << 8)) - ((yzhigh & 0x10) << 9)
+                        - offs_y)
                 rz = ((zlow | ((xzhigh & 0xe0) << 3) | ((yzhigh & 0xe0) << 6))
-                      - ((yzhigh & 0x40) << 7))
-                raw_xyz = (rx, ry, rz)
-                x = round(raw_xyz[x_pos] * x_scale, 6)
-                y = round(raw_xyz[y_pos] * y_scale, 6)
-                z = round(raw_xyz[z_pos] * z_scale, 6)
+                      - ((yzhigh & 0x40) << 7)) - offs_z
+                x = round(tr_x[0] * rx + tr_x[1] * ry + tr_x[2] * rz, 6)
+                y = round(tr_y[0] * rx + tr_y[1] * ry + tr_y[2] * rz, 6)
+                z = round(tr_z[0] * rx + tr_z[1] * ry + tr_z[2] * rz, 6)
                 ptime = round(time_base + (msg_cdiff + i) * inv_freq, 6)
                 samples[count] = (ptime, x, y, z)
                 count += 1
