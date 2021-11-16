@@ -172,8 +172,6 @@ class ResonanceTester:
         else:
             test_points = self.test.get_start_test_points()
 
-        for point in test_points:
-        test_points = self.test.get_start_test_points()
         for ptx_ind, point in enumerate(test_points):
             toolhead.manual_move(point, self.move_speed)
             if self.autocalibrate and ptx_ind == 0:

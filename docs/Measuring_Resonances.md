@@ -391,20 +391,21 @@ Restart Klipper via the `RESTART` command.
 
 ### Checking the setup
 
-Now you can test a connection.
+Now you can test a connection and calibrate the accelerometer. Home
+the printer, move the toolhead far away from the corners in X,Y plane
+(e.g. move it to the center of the print bed), and then:
 
 - For "non bed-slingers" (e.g. one accelerometer), in Octoprint,
-  enter `ACCELEROMETER_QUERY`
+  enter `ACCELEROMETER_CALIBRATE`
 - For "bed-slingers" (e.g. more than one accelerometer), enter
-  `ACCELEROMETER_QUERY CHIP=<chip>` where `<chip>` is the name of the chip
+  `ACCELEROMETER_CALIBRATE CHIP=<chip>` where `<chip>` is the name of the chip
   as-entered, e.g. `CHIP=bed` (see: [bed-slinger](#bed-slinger-printers))
   for all installed accelerometer chips.
 
-You should see the current measurements from the accelerometer, including the
-free-fall acceleration, e.g.
-```
-Recv: // adxl345 values (x, y, z): 470.719200, 941.438400, 9728.196800
-```
+This will run a basic calibration of the accelerometer and detect
+accelerometer orientation. It also runs some basic sanity checks
+and can detect some issues with the accelerometer or your setup
+(e.g. too noisy unbalanced fans).
 
 If you get an error like `Invalid adxl345 id (got xx vs e5)`, where `xx`
 is some other ID, immediately try again. There's an issue with SPI
@@ -421,6 +422,22 @@ baseline numbers for the noise of accelerometer on the axes (should be
 somewhere in the range of ~1-100). Too high axes noise (e.g. 1000 and more)
 can be indicative of the sensor issues, problems with its power, or too
 noisy imbalanced fans on a 3D printer.
+
+Note that if the accelerometer is installed permenantly, or temporarily on
+a fixed location (e.g. into the fixed holes on the hotend), it is sufficient
+to run accelerometer calibration only one time for each board. In this case,
+you can save the calibration results by issuing `SAVE_CONFIG` command after
+the calibration is done. If it is mounted each time to a new location
+(e.g. glued onto the bed of the bed slinger printer), it may be helpful to add
+`autocalibrate` option to `[resonance_tester]` section, as
+```
+[resonance_tester]
+accel_chip: ...
+autocalibrate: True
+...
+```
+Then, Klipper will run a calibration test prior to each resonance testing
+automatically.
 
 ### Measuring the resonances
 
