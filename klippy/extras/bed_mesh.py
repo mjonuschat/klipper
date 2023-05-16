@@ -2,9 +2,11 @@
 #
 # Copyright (C) 2018  Kevin O'Connor <kevin@koconnor.net>
 # Copyright (C) 2018-2019 Eric Callahan <arksine.code@gmail.com>
+# Copyright (C) 2023  Kyle Hansen (Kyleisah) <kyleisah@gmail.com>
+# Copyright (C) 2023  Mitko Haralanov <voidtrance@gmail.com>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
-import logging, math, json, collections
+import logging, math, json, collections, random
 from . import probe
 
 PROFILE_VERSION = 1
@@ -103,6 +105,8 @@ class BedMesh:
         self.log_fade_complete = False
         self.base_fade_target = config.getfloat('fade_target', None)
         self.fade_target = 0.
+        self.margin = config.getfloat('margin', 0.0)
+        self.max_fuzz = config.getfloat('max_fuzz', 0.0)
         self.gcode = self.printer.lookup_object('gcode')
         self.splitter = MoveSplitter(config, self.gcode)
         # setup persistent storage
@@ -286,6 +290,7 @@ class ZrefMode:
 
 class BedMeshCalibrate:
     ALGOS = ['lagrange', 'bicubic']
+
     def __init__(self, config, bedmesh):
         self.printer = config.get_printer()
         self.orig_config = {'radius': None, 'origin': None}
@@ -573,17 +578,106 @@ class BedMeshCalibrate:
                     "interpolation. Configured Probe Count: %d, %d" %
                     (self.mesh_config['x_count'], self.mesh_config['y_count']))
                 params['algo'] = 'lagrange'
-    def update_config(self, gcmd):
+    def update_config(self, gcmd, do_adaptive, exclude_object=None,
+                      max_fuzz=0, mesh_margin=0):
         # reset default configuration
         self.radius = self.orig_config['radius']
         self.origin = self.orig_config['origin']
         self.mesh_min = self.orig_config['mesh_min']
         self.mesh_max = self.orig_config['mesh_max']
+
         for key in list(self.mesh_config.keys()):
             self.mesh_config[key] = self.orig_config[key]
 
         params = gcmd.get_command_parameters()
         need_cfg_update = False
+
+        # If adaptive meshing is enabled and there are defined objects,
+        # generate adaptive mesh
+        if do_adaptive and exclude_object is not None and \
+                len(exclude_object.objects) != 0:
+            # List all exclude_object points by axis and iterate over
+            # all polygon points, and pick the min and max or each axis
+            list_of_xs = []
+            list_of_ys = []
+            gcmd.respond_info("Found %s objects" % (len(exclude_object.objects)))
+            for obj in exclude_object.objects:
+                for point in obj["polygon"]:
+                    list_of_xs.append(point[0])
+                    list_of_ys.append(point[1])
+
+            # Define bounds of adaptive mesh area
+            mesh_min = [min(list_of_xs), min(list_of_ys)]
+            mesh_max = [max(list_of_xs), max(list_of_ys)]
+            adjusted_mesh_min = [x - mesh_margin for x in mesh_min]
+            adjusted_mesh_max = [x + mesh_margin for x in mesh_max]
+
+            # Force margin to respect original mesh bounds
+            adjusted_mesh_min[0] = max(adjusted_mesh_min[0],
+                                       self.orig_config["mesh_min"][0])
+            adjusted_mesh_min[1] = max(adjusted_mesh_min[1],
+                                       self.orig_config["mesh_min"][1])
+            adjusted_mesh_max[0] = min(adjusted_mesh_max[0],
+                                       self.orig_config["mesh_max"][0])
+            adjusted_mesh_max[1] = min(adjusted_mesh_max[1],
+                                       self.orig_config["mesh_max"][1])
+
+            adjusted_mesh_size = (adjusted_mesh_max[0] - adjusted_mesh_min[0],
+                                  adjusted_mesh_max[1] - adjusted_mesh_min[1])
+
+            # Compute a ratio between the adapted and original sizes
+            ratio = (adjusted_mesh_size[0] /
+                     (self.orig_config["mesh_max"][0] - self.orig_config["mesh_min"][0]),
+                     adjusted_mesh_size[1] /
+                     (self.orig_config["mesh_max"][1] - self.orig_config["mesh_min"][1]))
+
+            gcmd.respond_info("Original mesh bounds: (%s,%s)" %
+                              (self.orig_config["mesh_min"], self.orig_config["mesh_max"]))
+            gcmd.respond_info("Original probe count: (%s,%s)" %
+                              (self.mesh_config["x_count"], self.mesh_config["y_count"]))
+            gcmd.respond_info("Adapted mesh bounds: (%s,%s)" %
+                              (adjusted_mesh_min, adjusted_mesh_max))
+            gcmd.respond_info("Ratio: (%s, %s)" % ratio)
+
+            new_x_probe_count = int(
+                math.ceil(self.mesh_config["x_count"] * ratio[0]))
+            new_y_probe_count = int(
+                math.ceil(self.mesh_config["y_count"] * ratio[1]))
+            new_x_probe_count += 1 - (new_x_probe_count & 1)
+            new_y_probe_count += 1 - (new_y_probe_count & 1)
+
+            # There is one case, where we may have to adjust the probe counts:
+            # axis0 < 4 and axis1 > 6 (see _verify_algorithm).
+            min_num_of_probes = 3
+            if max(new_x_probe_count, new_y_probe_count) > 6 and \
+               min(new_x_probe_count, new_y_probe_count) < 4:
+                min_num_of_probes = 4
+
+            new_x_probe_count = max(min_num_of_probes, new_x_probe_count)
+            new_y_probe_count = max(min_num_of_probes, new_y_probe_count)
+
+            gcmd.respond_info("Adapted probe count: (%s,%s)" %
+                              (new_x_probe_count, new_y_probe_count))
+
+            # If the adapted mesh size is too small, adjust it to something useful.
+            adjusted_mesh_size = (max(adjusted_mesh_size[0], new_x_probe_count),
+                                  max(adjusted_mesh_size[1], new_y_probe_count))
+
+            if self.radius is not None:
+                self.radius = math.sqrt((adjusted_mesh_size[0] ** 2) +
+                                        (adjusted_mesh_size[1] ** 2)) / 2
+                self.origin = (adjusted_mesh_min[0] + (adjusted_mesh_size[0] / 2),
+                               adjusted_mesh_min[1] + (adjusted_mesh_size[1] / 2))
+                self.mesh_min = (-self.radius, -self.radius)
+                self.mesh_max = (self.radius, self.radius)
+                self.mesh_config["x_count"] = self.mesh_config["y_count"] = \
+                    max(new_x_probe_count, new_y_probe_count)
+            else:
+                self.mesh_min = adjusted_mesh_min
+                self.mesh_max = adjusted_mesh_max
+                self.mesh_config["x_count"] = new_x_probe_count
+                self.mesh_config["y_count"] = new_y_probe_count
+            need_cfg_update = True
         if self.radius is not None:
             if "MESH_RADIUS" in params:
                 self.radius = gcmd.get_float("MESH_RADIUS")
@@ -615,6 +709,25 @@ class BedMeshCalibrate:
         if "ALGORITHM" in params:
             self.mesh_config['algo'] = gcmd.get('ALGORITHM').strip().lower()
             need_cfg_update = True
+
+        if max_fuzz:
+            def fuzzer(val, min=0, max=9999):
+                fuzz = random.uniform(0, max_fuzz)
+                sign = random.choice([1, -1])
+                v = val + (fuzz * sign)
+                if v < min or v > max:
+                    v = val + (fuzz * sign * -1)
+                return v
+            self.mesh_min = [fuzzer(self.mesh_min[0],
+                                    self.orig_config["mesh_min"][0]),
+                             fuzzer(self.mesh_min[1],
+                                    self.orig_config["mesh_min"][1])]
+            self.mesh_max = [fuzzer(self.mesh_max[0], 0,
+                                    self.orig_config["mesh_max"][0]),
+                             fuzzer(self.mesh_max[1], 0,
+                                    self.orig_config["mesh_max"][1])]
+            gcmd.respond_info("Fuzzed mesh: [%s, %s]" %
+                              (self.mesh_min, self.mesh_max))
 
         if need_cfg_update:
             self._verify_algorithm(gcmd.error)
@@ -649,12 +762,19 @@ class BedMeshCalibrate:
             adj_pts.append(self.zero_ref_pos)
         return adj_pts
     cmd_BED_MESH_CALIBRATE_help = "Perform Mesh Bed Leveling"
+
     def cmd_BED_MESH_CALIBRATE(self, gcmd):
         self._profile_name = gcmd.get('PROFILE', "default")
         if not self._profile_name.strip():
             raise gcmd.error("Value for parameter 'PROFILE' must be specified")
+        exclude_object = None
+        adaptive_mesh = bool(gcmd.get_int('ADAPTIVE', 0))
+        fuzz = gcmd.get_float('ADAPTIVE_FUZZ', self.bedmesh.max_fuzz)
+        margin = gcmd.get_float('ADAPTIVE_MARGIN', self.bedmesh.margin)
+        if adaptive_mesh:
+            exclude_object = self.printer.lookup_object("exclude_object")
         self.bedmesh.set_mesh(None)
-        self.update_config(gcmd)
+        self.update_config(gcmd, adaptive_mesh, exclude_object, fuzz, margin)
         self.probe_helper.start_probe(gcmd)
     def probe_finalize(self, offsets, positions):
         x_offset, y_offset, z_offset = offsets

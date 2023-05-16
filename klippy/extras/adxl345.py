@@ -614,6 +614,19 @@ class ADXL345:
                     "This is generally indicative of connection problems "
                     "(e.g. faulty wiring) or a faulty adxl345 chip." % (
                         reg, val, stored_val))
+    def get_config(self):
+        return self.config
+    def set_transform(self, axes_transform, offset):
+        def _scale(index):
+            if index == 2:
+                return SCALE_Z
+            else:
+                return SCALE_XY
+
+        logging.info("SET TRANSFORM", offset, axes_transform)
+        self.offset = [coeff / _scale(i) for i, coeff in enumerate(offset)]
+        self.axes_transform = [[coeff * _scale(i) for i, coeff in enumerate(axis)]
+                               for axis in axes_transform]
     # Measurement collection
     def is_measuring(self):
         return self.query_rate > 0
